@@ -1,1 +1,1 @@
-{"name":"comfy-normalizedexport","private":true,"type":"module","scripts":{"test":"node --test \"test/**/*.test.js\""}}
+{"name": "comfy-cid", "private": true, "type": "module", "scripts": {"test": "node --test \"test/**/*.test.js\"", "test:py": "python3 -m unittest discover -s test -p 'test_*.py'"}}

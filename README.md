@@ -1,6 +1,71 @@
-# comfy-normalizedexport
+# comfy-cid
 
-ComfyUI 워크플로를 **API 포맷**으로 내보낼 때 노드 번호를 `"1".."N"`으로 다시 매기는 프론트엔드 확장입니다.
+ComfyUI 개인용 확장 모음입니다. 두 부분으로 되어 있습니다.
+
+- **Export (API, normalized)**: API 포맷 export의 노드 번호를 `"1".."N"`으로 다시 매기는 프론트엔드 커맨드
+- **CiD 노드**: 통합 모델 로더, 길이→프레임 수, 종횡비/메가픽셀 해상도 계산
+
+## 설치
+
+ComfyUI의 `custom_nodes` 폴더에 clone 한 뒤 ComfyUI를 재시작합니다.
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/CiDMaker/comfy-cid.git
+```
+
+Python 의존성은 없습니다(ComfyUI 자체가 제공하는 것만 씁니다). ComfyUI 프론트엔드 1.27 이상을 권장합니다(그 이하 버전에서도 동작하지만 메뉴 위치가 다릅니다. 아래 "알려진 제약" 참고).
+
+## CiD 노드
+
+노드 검색에서 `[CiD]`로 찾을 수 있고, 카테고리는 `CiD/loaders`, `CiD/video`, `CiD/image`입니다.
+
+### Model Loader (UNET + CLIP + 2 VAE)
+
+Load Diffusion Model, Load CLIP, Load VAE 2개를 한 노드로 합친 것입니다. 비디오 VAE와 오디오 VAE가 따로 있는 모델(MiniMax H3 등)에 맞춰 두었습니다.
+
+- 입력: `unet_name`, `weight_dtype`, `clip_name`, `clip_type`, `clip_device`, `video_vae_name`, `audio_vae_name`
+- 출력: `MODEL`, `CLIP`, `VIDEO_VAE`, `AUDIO_VAE`
+
+선택지와 동작은 코어 로더와 같습니다. ComfyUI가 새 CLIP 타입이나 가중치 dtype을 추가하면 이 노드에도 바로 나타납니다.
+
+**입력 하나만 바꿔도 네 모델이 모두 다시 로드됩니다.** 한 조각만 자주 바꾸는 워크플로라면 그 부분은 코어 로더를 따로 두는 편이 낫습니다.
+
+### Video Frames from Duration
+
+초 단위 길이와 fps로 프레임 수(`frames`)를 냅니다. `mode`로 계산 규칙을 고릅니다.
+
+| mode | 규칙 |
+| --- | --- |
+| `default` (기본값) | `floor(duration × fps + 1)`. 일반 비디오 모델용 |
+| `h3` | `round(duration × fps)`를 5 이상으로 잡은 뒤 17k+5(5, 22, 39, 56, …) 중 가장 가까운 위의 값으로 올림. MiniMax H3용 |
+
+| duration | fps | default | h3 |
+| --- | --- | --- | --- |
+| 5.0 | 24 | 121 | 124 |
+| 1.0 | 24 | 25 | 39 |
+| 0.0 | 24 | 1 | 5 |
+
+`h3`의 상수 17, 5, 5는 advanced 입력 `frame_step`, `frame_offset`, `min_frames`로 바꿀 수 있습니다. `default`에서는 쓰이지 않습니다.
+
+### Size Parameters
+
+종횡비와 메가픽셀로 가로세로를 계산하고, `scale_by`를 곱한 업스케일 가로세로도 함께 냅니다. 이미지와 비디오 모두에 씁니다.
+
+| 입력 | 뜻 | 기본값 |
+| --- | --- | --- |
+| `ratio_width`, `ratio_height` | 종횡비. 9:16이면 9, 16 | 1, 1 |
+| `megapixels` | 목표 픽셀 수. 1 = 1024×1024 | 1.0 |
+| `multiple_of` | 모든 변을 이 값의 배수로 맞춤 | 16 |
+| `scale_by` | 업스케일 배율 | 2.0 |
+
+출력은 `width`, `height`, `upscaled_width`, `upscaled_height`, `scale_by`, `multiple_of`입니다. `scale_by`와 `multiple_of`는 입력값이 그대로 나오므로 이 노드 하나를 제어판처럼 쓸 수 있습니다.
+
+기본값이면 1024×1024, 업스케일 2048×2048이 나옵니다. 9:16에 0.5 MP, multiple_of 32로 하면 544×960, 업스케일 1088×1920입니다. `width × height`는 대략 `megapixels × 1024 × 1024`이고 각 변은 `multiple_of`의 배수로 반올림됩니다.
+
+## Export (API, normalized)
+
+워크플로를 **API 포맷**으로 내보낼 때 노드 번호를 `"1".."N"`으로 다시 매기는 프론트엔드 커맨드입니다.
 
 워크플로를 자주 고치다 보면 API export의 노드 번호가 계속 커지고 순서도 뒤섞입니다.
 API를 소비하는 쪽 UI가 노드 번호 순서대로 입력을 노출한다면, 그 순서를 export 시점에 내가 의도한 대로 고정하고 싶어집니다.
@@ -11,20 +76,7 @@ API를 소비하는 쪽 UI가 노드 번호 순서대로 입력을 노출한다�
 - 모든 `inputs`의 링크 참조 `[nodeId, slot]`을 새 번호로 갱신
 - JSON 파일로 다운로드
 
-캔버스용 노드는 등록하지 않습니다(`NODE_CLASS_MAPPINGS`는 비어 있음).
-
-## 설치
-
-ComfyUI의 `custom_nodes` 폴더에 clone 한 뒤 ComfyUI를 재시작합니다.
-
-```bash
-cd ComfyUI/custom_nodes
-git clone https://github.com/CiDMaker/comfy-normalizedexport.git
-```
-
-Python 의존성은 없습니다. ComfyUI 프론트엔드 1.27 이상을 권장합니다(그 이하 버전에서도 동작하지만 메뉴 위치가 다릅니다. 아래 "알려진 제약" 참고).
-
-## 사용법
+### 사용법
 
 1. 워크플로를 평소처럼 구성합니다.
 2. 다음 중 하나로 커맨드를 실행합니다.
@@ -35,7 +87,7 @@ Python 의존성은 없습니다. ComfyUI 프론트엔드 1.27 이상을 권장�
 
 결과 파일은 ComfyUI의 일반 API 포맷과 동일한 구조이므로 `/prompt` 엔드포인트에 그대로 보낼 수 있습니다.
 
-### 설정
+#### 설정
 
 설정 창(톱니바퀴)의 **Normalized Export** 항목에서 바꿉니다.
 
@@ -45,11 +97,11 @@ Python 의존성은 없습니다. ComfyUI 프론트엔드 1.27 이상을 권장�
 | Strip [n] prefix from titles | 꺼짐 | 켜면 `_meta.title`에서 앞쪽 `[n]` 표시를 제거해 내보냄 |
 | Download filename | `workflow_api_normalized.json` | 다운로드 파일명. `.json`이 없으면 자동으로 붙임 |
 
-## 정렬 모드
+### 정렬 모드
 
 세 모드 모두 **결정적**입니다. 같은 입력에는 항상 같은 결과가 나옵니다.
 
-### `title` (기본값)
+#### `title` (기본값)
 
 노드 제목이 `[n] ...` 형식이면 그 노드들을 `n` 오름차순으로 맨 앞에 둡니다.
 표시가 없는 노드는 그 뒤에 위상 정렬 순서로 이어집니다.
@@ -58,7 +110,7 @@ Python 의존성은 없습니다. ComfyUI 프론트엔드 1.27 이상을 권장�
 - 같은 번호가 여러 개면 그들 사이의 순서는 위상 정렬 순서로 정합니다.
 - 제목 앞부분만 봅니다. `[3] KSampler`, `[ 3 ]KSampler`는 인식하지만 `KSampler [3]`은 인식하지 않습니다.
 
-### `sequential`
+#### `sequential`
 
 원래 노드 ID 순서입니다. 서브그래프 경로 키(`"12:37"`)는 `:`로 나눈 세그먼트별 숫자 비교를 합니다.
 
@@ -66,7 +118,7 @@ Python 의존성은 없습니다. ComfyUI 프론트엔드 1.27 이상을 권장�
 5 < 12 < 12:3 < 12:37 < 13
 ```
 
-### `topological`
+#### `topological`
 
 Kahn 알고리즘으로 실행 의존 순서를 따릅니다. 동시에 준비된 노드가 여러 개면 원래 ID 순(세그먼트 비교)으로 결정합니다.
 
@@ -82,7 +134,7 @@ ComfyUI 기본 txt2img 워크플로(노드 3~9)를 예로 들면:
 | 8 | VAE Decode | 6 |
 | 9 | Save Image | 7 |
 
-## 제목 `[n]` 규칙 예시
+### 제목 `[n]` 규칙 예시
 
 노드 제목을 더블클릭해 다음처럼 바꿔 둡니다(모드 `title`).
 
@@ -101,13 +153,13 @@ ComfyUI 기본 txt2img 워크플로(노드 3~9)를 예로 들면:
 
 **Strip [n] prefix from titles**를 켜면 `_meta.title`이 `Save Image`, `Empty Latent`처럼 깔끔해집니다. 끄면 `[1] Save Image` 그대로 나갑니다(소비하는 쪽에서 번호를 보고 싶을 때).
 
-## 서브그래프 처리
+### 서브그래프 처리
 
 서브그래프 내부 노드는 API 포맷에서 `"12:37"` 같은 **경로 키**로 평탄화됩니다.
 JavaScript 객체는 정수형 키를 항상 먼저 오름차순으로 나열하고 그 뒤에 문자열 키를 붙이기 때문에, 이런 키가 섞이면 `Object.keys()` 순서가 의도와 어긋납니다.
 이 확장은 경로 키도 전부 일반 정수 키 `"1".."N"`으로 바꾸고, 경로 키를 가리키던 링크 참조도 함께 갱신합니다.
 
-## 동작 세부
+### 동작 세부
 
 - 링크 판별: 값이 길이 2 배열이고 첫 원소가 prompt에 존재하는 키일 때만 링크로 취급합니다. 그 밖의 배열 값은 손대지 않습니다.
 - 입력 객체는 `structuredClone`으로 복사해 원본을 바꾸지 않습니다.
@@ -116,24 +168,29 @@ JavaScript 객체는 정수형 키를 항상 먼저 오름차순으로 나열하
 
 ## 개발 / 테스트
 
-순수 로직은 `js/normalize_core.js`에 있고 ComfyUI import가 없어 단독으로 테스트할 수 있습니다.
+export 로직은 `js/normalize_core.js`에, 노드의 계산은 `cid_nodes/*.py`의 모듈 함수에 있어 ComfyUI 없이 테스트할 수 있습니다.
 
 ```bash
-npm test
+npm test        # JS (Node 22 기준)
+npm run test:py # Python unittest
 ```
-
-Node 22 기준 `node --test "test/**/*.test.js"`를 실행합니다.
 
 ```
 js/
   normalize_core.js   # 순수 로직 (정렬, 재번호, 링크 갱신)
   normalize.js        # app.registerExtension (커맨드, 메뉴, 단축키, 설정)
+cid_nodes/
+  __init__.py         # NODE_CLASS_MAPPINGS / NODE_DISPLAY_NAME_MAPPINGS
+  loader.py           # CiD_ModelLoader
+  video_frames.py     # CiD_VideoFrames
+  size_params.py      # CiD_SizeParams
 test/
   normalize_core.test.js
-__init__.py           # NODE_CLASS_MAPPINGS = {}, WEB_DIRECTORY = "./js"
+  test_cid_nodes.py
+__init__.py           # cid_nodes의 매핑을 재노출, WEB_DIRECTORY = "./js"
 ```
 
-## 알려진 제약
+## 알려진 제약 (Export)
 
 - **메뉴 위치**: ComfyUI 프론트엔드 1.27.0에서 상단 메뉴 그룹 이름이 `Workflow`에서 `File`로 바뀌었습니다. 이 확장은 프론트엔드 버전을 보고 알맞은 그룹에 넣지만, 버전을 읽지 못하면 `File`에 넣습니다. 메뉴가 보이지 않으면 단축키 **Ctrl+Alt+E**나 커맨드 팔레트를 쓰세요.
 - **단축키 충돌**: 다른 확장이 Ctrl+Alt+E를 먼저 잡고 있으면 등록되지 않고 경고 토스트만 뜹니다. 설정 → Keybinding에서 직접 바꿀 수 있습니다.

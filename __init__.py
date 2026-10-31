@@ -1,14 +1,16 @@
-"""comfy-normalizedexport
+"""comfy-cid
 
-Frontend-only ComfyUI extension. It adds an "Export (API, normalized)"
-command that re-numbers the nodes of the API-format export to "1".."N"
-(in a user-selected order) and rewrites every link reference accordingly.
+ComfyUI extension with two parts:
 
-No canvas nodes are registered; the package exists only to serve ./js.
+* ./js  - frontend-only "Export (API, normalized)" command that re-numbers
+          the API export's nodes to "1".."N" and rewrites link references.
+* ./cid_nodes - backend nodes that replace subgraphs the author kept
+          rebuilding: a combined model/CLIP/2xVAE loader, a duration->frames
+          node, and an aspect-ratio/megapixel size calculator.
 """
 
-NODE_CLASS_MAPPINGS = {}
-NODE_DISPLAY_NAME_MAPPINGS = {}
+from .cid_nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+
 WEB_DIRECTORY = "./js"
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
