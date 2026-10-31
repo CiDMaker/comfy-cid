@@ -3,7 +3,7 @@
 ComfyUI 개인용 확장 모음입니다. 두 부분으로 되어 있습니다.
 
 - **Export (API, normalized)**: API 포맷 export의 노드 번호를 `"1".."N"`으로 다시 매기는 프론트엔드 커맨드
-- **CiD 노드**: 통합 모델 로더, 길이→프레임 수, 종횡비/메가픽셀 해상도 계산
+- **CiD 노드**: 통합 모델 로더, 길이→프레임 수, 종횡비/메가픽셀 해상도 계산, H3 keyframe 크기 변환
 
 ## 설치
 
@@ -62,6 +62,29 @@ Load Diffusion Model, Load CLIP, Load VAE 2개를 한 노드로 합친 것입니
 출력은 `width`, `height`, `upscaled_width`, `upscaled_height`, `scale_by`, `multiple_of`입니다. `scale_by`와 `multiple_of`는 입력값이 그대로 나오므로 이 노드 하나를 제어판처럼 쓸 수 있습니다.
 
 기본값이면 1024×1024, 업스케일 2048×2048이 나옵니다. 9:16에 0.5 MP, multiple_of 32로 하면 544×960, 업스케일 1088×1920입니다. `width × height`는 대략 `megapixels × 1024 × 1024`이고 각 변은 `multiple_of`의 배수로 반올림됩니다.
+
+### Resize H3 Keyframes to Latent
+
+MiniMax H3의 FLF(first/last frame) conditioning을 다른 크기의 latent에 맞게 고칩니다. Pass1 conditioning을 업스케일된 latent로 2차 샘플링할 때 씁니다.
+
+MiniMax H3 Image to Video가 내는 conditioning은 텍스트 임베딩과 `minimax_keyframes`(first/last 이미지를 캔버스 크기로 맞춰 VAE 인코딩한 latent)로 되어 있습니다. DiT는 keyframe latent를 샘플링할 latent의 공간 그리드에 맞춰 패킹하므로 **keyframe latent의 가로세로는 latent와 정확히 같아야** 합니다. 크기에 묶인 부분은 이것뿐이라, 2차 패스를 위해 텍스트 인코더(Qwen3-VL-32B)를 다시 돌릴 필요가 없습니다. 이 노드는 keyframe만 바꾸고 나머지는 그대로 둡니다.
+
+| 입력 | 뜻 |
+| --- | --- |
+| `conditioning` | Pass1의 MiniMax H3 Image to Video 출력 |
+| `latent` | 다음 패스가 샘플링할 latent(업스케일 결과). 가로세로와 프레임 수를 여기서 읽음 |
+| `vae` (optional) | 비디오 VAE. `first_frame`/`last_frame`을 연결했을 때 필요 |
+| `first_frame` (optional) | latent 크기로 늘려(stretch) 다시 인코딩, 0번 프레임 keyframe |
+| `last_frame` (optional) | latent 크기로 center crop 해 다시 인코딩, 마지막 프레임 keyframe |
+
+출력은 `conditioning` 하나입니다.
+
+- 가로세로는 `latent × 16`, 프레임 수는 latent의 T에서 계산하므로 별도의 width/height 입력이 없습니다. 업스케일러가 실제로 만든 크기와 어긋날 일이 없습니다.
+- 연결한 `first_frame`/`last_frame`은 코어 노드와 같은 규칙(first는 stretch, last는 center crop)으로 리사이즈한 뒤 VAE로 다시 인코딩합니다. 기존 keyframe이 있으면 그 자리에 들어가고, 없으면 추가됩니다.
+- 그 외 keyframe(예: Add Guide for MiniMax H3로 넣은 앵커)은 인덱스와 오디오를 유지한 채 비디오 latent만 bilinear로 보간합니다. 이미지와 VAE를 안 연결하면 first/last도 이 방식으로 처리됩니다. 화질은 다시 인코딩하는 쪽이 낫습니다.
+- latent 길이와 맞지 않는 keyframe(프레임 인덱스가 범위 밖)이 있으면 에러를 냅니다. conditioning과 latent가 다른 길이로 만들어진 경우입니다.
+
+Pass1 텍스트 임베딩에는 원래 캔버스 크기 이미지의 vision 토큰이 들어 있습니다. 업스케일 크기로 MiniMax H3 Image to Video를 다시 돌리면 vision 토큰 수가 달라지는데, 이 노드는 그 차이를 재현하지 않습니다. 결과에 차이가 느껴지면 기존 방식과 비교해 보세요.
 
 ## Export (API, normalized)
 

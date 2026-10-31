@@ -56,6 +56,8 @@ _stub.VAELoader = _StubVAELoader
 sys.modules.setdefault("nodes", _stub)
 
 import cid_nodes  # noqa: E402
+from cid_nodes.h3_keyframes import (CiDH3ResizeKeyframes, frame_count_from_latent_t,  # noqa: E402
+                                    merge_keyframes)
 from cid_nodes.loader import CiDModelLoader  # noqa: E402
 from cid_nodes.size_params import CiDSizeParams, size_params  # noqa: E402
 from cid_nodes.video_frames import MODES, CiDVideoFrames, frames_for_duration  # noqa: E402
@@ -239,6 +241,151 @@ class TestModelLoader(unittest.TestCase):
         self.assertEqual(_calls, [("unet", "u1.safetensors", "fp8_e4m3fn"),
                                   ("clip", "c1.safetensors", "minimax", "cpu"),
                                   ("vae", "v1.safetensors"), ("vae", "v2.safetensors")])
+
+
+# --- H3 keyframes: duck-typed tensors, no torch here -------------------------
+
+class _Shape:
+    """Stands in for a tensor: only ndim / shape are read on the no-resize path."""
+
+    def __init__(self, *shape):
+        self.shape = tuple(shape)
+        self.ndim = len(shape)
+
+
+class _Nested:
+    def __init__(self, *tensors):
+        self.tensors = list(tensors)
+        self.is_nested = True
+
+
+class _Image(_Shape):
+    def __getitem__(self, item):
+        return self
+
+
+class _VAE:
+    def __init__(self, h, w):
+        self.h, self.w = h, w
+        self.calls = []
+
+    def encode(self, image):
+        self.calls.append(image)
+        return _Shape(1, 24, 1, self.h, self.w)
+
+
+class TestH3Keyframes(unittest.TestCase):
+    def test_frame_count_matches_core_pattern(self):
+        # comfy_extras.nodes_minimax_h3.video_latent_t inverted: 5 -> 2, 22 -> 7, 124 -> 37
+        self.assertEqual(frame_count_from_latent_t(2), 5)
+        self.assertEqual(frame_count_from_latent_t(7), 22)
+        self.assertEqual(frame_count_from_latent_t(37), 124)
+        self.assertEqual(frame_count_from_latent_t(1), 1)
+        for t in range(2, 60, 5):
+            self.assertEqual(frame_count_from_latent_t(t) % 17, 5)
+
+    def test_merge_replaces_in_place_and_keeps_audio(self):
+        existing = [{"resolved_frame_index": 0, "latent": "old0"},
+                    {"resolved_frame_index": 60, "latent": "mid", "audio_latent": "a60"},
+                    {"resolved_frame_index": 123, "latent": "old123", "audio_latent": "a123"}]
+        kfs, to_resize = merge_keyframes(existing, {0: "new0", 123: "new123"}, 124)
+        self.assertEqual(kfs, [{"resolved_frame_index": 0, "latent": "new0"},
+                               {"resolved_frame_index": 60, "latent": "mid", "audio_latent": "a60"},
+                               {"resolved_frame_index": 123, "latent": "new123", "audio_latent": "a123"}])
+        self.assertEqual(to_resize, [1])
+        self.assertEqual(existing[0]["latent"], "old0")  # input not mutated
+
+    def test_merge_appends_missing_replacements_in_frame_order(self):
+        kfs, to_resize = merge_keyframes([], {123: "last", 0: "first"}, 124)
+        self.assertEqual(kfs, [{"resolved_frame_index": 0, "latent": "first"},
+                               {"resolved_frame_index": 123, "latent": "last"}])
+        self.assertEqual(to_resize, [])
+        kfs, _ = merge_keyframes([{"resolved_frame_index": 0, "latent": "x"}], {123: "last"}, 124)
+        self.assertEqual([k["resolved_frame_index"] for k in kfs], [0, 123])
+
+    def test_merge_audio_only_keyframes_are_not_resized(self):
+        kfs, to_resize = merge_keyframes([{"resolved_frame_index": 10, "audio_latent": "a"}], {}, 124)
+        self.assertEqual(kfs, [{"resolved_frame_index": 10, "audio_latent": "a"}])
+        self.assertEqual(to_resize, [])
+
+    def test_merge_rejects_keyframes_outside_the_latent(self):
+        with self.assertRaises(ValueError):
+            merge_keyframes([{"resolved_frame_index": 124, "latent": "x"}], {}, 124)
+
+    def test_node_contract(self):
+        spec = CiDH3ResizeKeyframes.INPUT_TYPES()
+        self.assertEqual(list(spec["required"]), ["conditioning", "latent"])
+        self.assertEqual(list(spec["optional"]), ["vae", "first_frame", "last_frame"])
+        self.assertEqual(CiDH3ResizeKeyframes.RETURN_TYPES, ("CONDITIONING",))
+        self.assertEqual(CiDH3ResizeKeyframes.RETURN_NAMES, ("conditioning",))
+
+    def _latent(self, t=37, h=96, w=168, nested=True):
+        video = _Shape(1, 24, t, h, w)
+        return {"samples": _Nested(video, _Shape(1, 32, 2, 200)) if nested else video}
+
+    def test_reencodes_connected_frames_at_latent_size(self):
+        vae = _VAE(96, 168)
+        cond = [["emb", {"minimax_keyframes": [{"resolved_frame_index": 0, "latent": _Shape(1, 24, 1, 48, 84)},
+                                               {"resolved_frame_index": 123, "latent": _Shape(1, 24, 1, 48, 84)}],
+                         "other": 1}]]
+        first, last = _Image(1, 720, 1280, 3), _Image(1, 1080, 1920, 3)
+
+        resized = []
+
+        def fake_resize_image(image, width, height, crop):
+            resized.append((image, width, height, crop))
+            return image
+
+        import cid_nodes.h3_keyframes as mod
+        original = mod._resize_image
+        mod._resize_image = fake_resize_image
+        try:
+            (out,) = CiDH3ResizeKeyframes().resize(cond, self._latent(), vae=vae, first_frame=first, last_frame=last)
+        finally:
+            mod._resize_image = original
+
+        self.assertEqual(resized, [(first, 2688, 1536, "disabled"), (last, 2688, 1536, "center")])
+        self.assertEqual(vae.calls, [first, last])
+        kfs = out[0][1]["minimax_keyframes"]
+        self.assertEqual([k["resolved_frame_index"] for k in kfs], [0, 123])
+        for k in kfs:
+            self.assertEqual(k["latent"].shape[-2:], (96, 168))
+        self.assertEqual(out[0][1]["other"], 1)
+        self.assertEqual(out[0][0], "emb")
+        # input conditioning untouched
+        self.assertEqual(cond[0][1]["minimax_keyframes"][0]["latent"].shape[-2:], (48, 84))
+
+    def test_plain_video_latent_and_first_frame_only(self):
+        vae = _VAE(96, 168)
+        cond = [["emb", {}]]
+        import cid_nodes.h3_keyframes as mod
+        original = mod._resize_image
+        mod._resize_image = lambda image, width, height, crop: image
+        try:
+            (out,) = CiDH3ResizeKeyframes().resize(cond, self._latent(nested=False), vae=vae,
+                                                   first_frame=_Image(1, 8, 8, 3))
+        finally:
+            mod._resize_image = original
+        self.assertEqual([k["resolved_frame_index"] for k in out[0][1]["minimax_keyframes"]], [0])
+
+    def test_matching_keyframes_pass_through_without_torch(self):
+        kf = {"resolved_frame_index": 0, "latent": _Shape(1, 24, 1, 96, 168)}
+        cond = [["emb", {"minimax_keyframes": [kf]}]]
+        (out,) = CiDH3ResizeKeyframes().resize(cond, self._latent())
+        self.assertIs(out[0][1]["minimax_keyframes"][0]["latent"], kf["latent"])
+
+    def test_no_keyframes_and_no_frames_is_a_no_op(self):
+        cond = [["emb", {"x": 1}]]
+        (out,) = CiDH3ResizeKeyframes().resize(cond, self._latent())
+        self.assertEqual(out, cond)
+
+    def test_frames_without_vae_raise(self):
+        with self.assertRaises(ValueError):
+            CiDH3ResizeKeyframes().resize([["emb", {}]], self._latent(), first_frame=_Image(1, 8, 8, 3))
+
+    def test_wrong_latent_raises(self):
+        with self.assertRaises(ValueError):
+            CiDH3ResizeKeyframes().resize([["emb", {}]], {"samples": _Shape(1, 4, 64, 64)})
 
 
 if __name__ == "__main__":
