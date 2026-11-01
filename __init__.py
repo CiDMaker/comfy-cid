@@ -5,8 +5,9 @@ ComfyUI extension with two parts:
 * ./js  - frontend-only "Export (API, normalized)" command that re-numbers
           the API export's nodes to "1".."N" and rewrites link references.
 * ./cid_nodes - backend nodes that replace subgraphs the author kept
-          rebuilding: a combined model/CLIP/2xVAE loader, a duration->frames
-          node, and an aspect-ratio/megapixel size calculator.
+          rebuilding: a combined model/CLIP/2xVAE loader, a text encoder
+          unload barrier, a duration->frames node, an aspect-ratio/megapixel
+          size calculator and an H3 keyframe resizer.
 """
 
 from .cid_nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS

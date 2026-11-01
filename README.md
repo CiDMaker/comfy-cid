@@ -3,7 +3,7 @@
 ComfyUI 개인용 확장 모음입니다. 두 부분으로 되어 있습니다.
 
 - **Export (API, normalized)**: API 포맷 export의 노드 번호를 `"1".."N"`으로 다시 매기는 프론트엔드 커맨드
-- **CiD 노드**: 통합 모델 로더, 길이→프레임 수, 종횡비/메가픽셀 해상도 계산, H3 keyframe 크기 변환
+- **CiD 노드**: 통합 모델 로더, 텍스트 인코더 언로드, 길이→프레임 수, 종횡비/메가픽셀 해상도 계산, H3 keyframe 크기 변환
 
 ## 설치
 
@@ -30,6 +30,29 @@ Load Diffusion Model, Load CLIP, Load VAE 2개를 한 노드로 합친 것입니
 선택지와 동작은 코어 로더와 같습니다. ComfyUI가 새 CLIP 타입이나 가중치 dtype을 추가하면 이 노드에도 바로 나타납니다.
 
 **입력 하나만 바꿔도 네 모델이 모두 다시 로드됩니다.** 한 조각만 자주 바꾸는 워크플로라면 그 부분은 코어 로더를 따로 두는 편이 낫습니다.
+
+### Text Encoder Unload
+
+텍스트 인코딩이 끝난 뒤 CLIP(텍스트 인코더)만 GPU에서 내리는 통과 노드입니다. CLIP Text Encode와 샘플러 사이에 끼워 넣습니다.
+
+| 입력 | 뜻 |
+| --- | --- |
+| `clip` | 내릴 텍스트 인코더. 위의 Text Encode 노드들이 쓰는 것과 같은 CLIP 출력을 연결 |
+| `positive` | 그대로 통과 |
+| `negative` (선택) | 그대로 통과. 비워 두면 `positive`를 zero out한 것이 `negative` 출력으로 나옴 |
+
+출력은 `positive`, `negative`이며 입력이 바뀌지 않고 그대로 나옵니다. **샘플러를 이 노드의 출력에 연결**해야 합니다. conditioning 입력은 모든 텍스트 인코딩이 끝나야 준비되므로, ComfyUI의 의존 순서상 "인코딩 끝 → 언로드 → 샘플러"가 보장됩니다.
+
+`negative`를 연결하지 않으면 `negative` 출력은 `positive`를 코어 **Conditioning Zero Out**에 통과시킨 결과입니다. 임베딩과 pooled output 등이 0으로 채워지고 형태와 나머지 메타데이터는 그대로이므로, KSampler처럼 negative가 필수인 샘플러에도 바로 연결할 수 있고 Conditioning Zero Out 노드를 따로 둘 필요가 없습니다. 코어 클래스를 직접 호출하므로 ComfyUI가 zero out 대상 키를 추가하면 여기에도 바로 반영됩니다.
+
+언로드는 `comfy.model_management.unload_model_and_clones`로 해당 CLIP의 패처만 offload 장치(보통 CPU RAM)로 옮기는 것입니다. CLIP 객체와 가중치는 RAM에 남아 있고 노드 캐시도 그대로라, 다음 실행에서 프롬프트가 바뀌어 Text Encode가 다시 돌면 ComfyUI가 알아서 GPU로 다시 올립니다. 디스크에서 다시 읽지 않으며, 디퓨전 모델·VAE·ControlNet은 건드리지 않습니다. Model Loader와 같이 써도 네 모델이 다시 로드되는 일은 없습니다.
+
+내릴 것이 없는 경우는 실행을 깨지 않고 건너뜁니다.
+
+- `clip_device`를 `cpu`로 둔 경우: GPU에 올라간 게 없으므로 조용히 통과
+- ComfyUI를 `--gpu-only`로 띄운 경우: load/offload 장치가 같아 옮길 곳이 없으므로 경고 로그만 남기고 통과
+
+통합 메모리 장비(DGX Spark 등)에서는 GPU→CPU 이동이 물리 메모리 사용량을 줄이지 않습니다. 그 경우 효과는 CUDA 할당자 캐시 해제 정도입니다.
 
 ### Video Frames from Duration
 
@@ -205,8 +228,10 @@ js/
 cid_nodes/
   __init__.py         # NODE_CLASS_MAPPINGS / NODE_DISPLAY_NAME_MAPPINGS
   loader.py           # CiD_ModelLoader
+  clip_unload.py      # CiD_TextEncoderUnload
   video_frames.py     # CiD_VideoFrames
   size_params.py      # CiD_SizeParams
+  h3_keyframes.py     # CiD_H3ResizeKeyframes
 test/
   normalize_core.test.js
   test_cid_nodes.py

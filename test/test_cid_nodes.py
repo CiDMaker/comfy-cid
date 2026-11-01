@@ -49,13 +49,22 @@ class _StubVAELoader:
         return (f"VAE<{vae_name}>",)
 
 
+class _StubConditioningZeroOut:
+    def zero_out(self, conditioning):
+        _calls.append(("zero_out", conditioning))
+        return ([[("zeros_like", t), dict(d)] for t, d in conditioning],)
+
+
 _stub = types.ModuleType("nodes")
 _stub.UNETLoader = _StubUNETLoader
 _stub.CLIPLoader = _StubCLIPLoader
 _stub.VAELoader = _StubVAELoader
+_stub.ConditioningZeroOut = _StubConditioningZeroOut
 sys.modules.setdefault("nodes", _stub)
 
 import cid_nodes  # noqa: E402
+from cid_nodes.clip_unload import (SKIP_CPU, SKIP_SAME_DEVICE, UNLOAD,  # noqa: E402
+                                   CiDTextEncoderUnload, unload_action, unload_clip)
 from cid_nodes.h3_keyframes import (CiDH3ResizeKeyframes, frame_count_from_latent_t,  # noqa: E402
                                     merge_keyframes)
 from cid_nodes.loader import CiDModelLoader  # noqa: E402
@@ -386,6 +395,128 @@ class TestH3Keyframes(unittest.TestCase):
     def test_wrong_latent_raises(self):
         with self.assertRaises(ValueError):
             CiDH3ResizeKeyframes().resize([["emb", {}]], {"samples": _Shape(1, 4, 64, 64)})
+
+
+
+# --- text encoder unload: stub comfy.model_management per test --------------
+
+class _Patcher:
+    def __init__(self, load_device, offload_device):
+        self.load_device = load_device
+        self.offload_device = offload_device
+
+
+class _CLIP:
+    def __init__(self, patcher):
+        self.patcher = patcher
+
+
+class TestTextEncoderUnload(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+        self._saved = {k: sys.modules.get(k) for k in ("comfy", "comfy.model_management")}
+        self._install_mm(with_all_devices=True)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+    def _install_mm(self, with_all_devices):
+        calls = self.calls
+        mm = types.ModuleType("comfy.model_management")
+        if with_all_devices:
+            def unload_model_and_clones(model, unload_additional_models=True, all_devices=False):
+                calls.append(("unload", model, all_devices))
+        else:
+            def unload_model_and_clones(model, unload_additional_models=True):
+                calls.append(("unload", model))
+        mm.unload_model_and_clones = unload_model_and_clones
+        mm.soft_empty_cache = lambda force=False: calls.append(("empty_cache", force))
+        comfy = types.ModuleType("comfy")
+        comfy.model_management = mm
+        sys.modules["comfy"] = comfy
+        sys.modules["comfy.model_management"] = mm
+
+    def test_contract_and_slot_order(self):
+        spec = CiDTextEncoderUnload.INPUT_TYPES()
+        self.assertEqual(list(spec["required"]), ["clip", "positive"])
+        self.assertEqual(list(spec["optional"]), ["negative"])
+        self.assertEqual(spec["required"]["clip"][0], "CLIP")
+        self.assertEqual(spec["required"]["positive"][0], "CONDITIONING")
+        self.assertEqual(spec["optional"]["negative"][0], "CONDITIONING")
+        self.assertEqual(CiDTextEncoderUnload.RETURN_TYPES, ("CONDITIONING", "CONDITIONING"))
+        self.assertEqual(CiDTextEncoderUnload.RETURN_NAMES, ("positive", "negative"))
+        self.assertEqual(len(CiDTextEncoderUnload.OUTPUT_TOOLTIPS), 2)
+
+    def test_unload_action(self):
+        self.assertEqual(unload_action("cuda:0", "cpu"), UNLOAD)
+        self.assertEqual(unload_action("cpu", "cpu"), SKIP_CPU)
+        self.assertEqual(unload_action("meta", "meta"), SKIP_CPU)
+        self.assertEqual(unload_action("cuda:0", "cuda:0"), SKIP_SAME_DEVICE)
+        self.assertEqual(unload_action(None, None), UNLOAD)
+
+    def test_passthrough_and_unload(self):
+        patcher = _Patcher("cuda:0", "cpu")
+        pos, neg = object(), object()
+        out = CiDTextEncoderUnload().unload(_CLIP(patcher), pos, neg)
+        self.assertIs(out[0], pos)
+        self.assertIs(out[1], neg)
+        self.assertEqual(self.calls, [("unload", patcher, True), ("empty_cache", True)])
+
+    def test_old_signature_without_all_devices(self):
+        self._install_mm(with_all_devices=False)
+        patcher = _Patcher("cuda:0", "cpu")
+        self.assertEqual(unload_clip(_CLIP(patcher)), UNLOAD)
+        self.assertEqual(self.calls, [("unload", patcher), ("empty_cache", True)])
+
+    def test_empty_cache_runs_even_if_unload_raises(self):
+        def boom(model, **kw):
+            raise RuntimeError("x")
+        sys.modules["comfy.model_management"].unload_model_and_clones = boom
+        with self.assertRaises(RuntimeError):
+            unload_clip(_CLIP(_Patcher("cuda:0", "cpu")))
+        self.assertEqual(self.calls, [("empty_cache", True)])
+
+    def test_cpu_clip_is_skipped_silently(self):
+        pos = [["emb", {}]]
+        with self.assertNoLogs(level="WARNING"):
+            out = CiDTextEncoderUnload().unload(_CLIP(_Patcher("cpu", "cpu")), pos, None)
+        self.assertIs(out[0], pos)
+        self.assertEqual(out[1], [[("zeros_like", "emb"), {}]])
+        self.assertEqual(self.calls, [])
+
+    def test_gpu_only_is_skipped_with_warning(self):
+        with self.assertLogs(level="WARNING") as logs:
+            self.assertEqual(unload_clip(_CLIP(_Patcher("cuda:0", "cuda:0"))), SKIP_SAME_DEVICE)
+        self.assertIn("gpu-only", logs.output[0])
+        self.assertEqual(self.calls, [])
+
+    def test_missing_negative_is_zeroed_positive(self):
+        # Same as wiring the core Conditioning Zero Out node from positive to negative.
+        _calls.clear()
+        patcher = _Patcher("cuda:0", "cpu")
+        pos = [["emb", {"pooled_output": "pool", "minimax_keyframes": ["kf"]}]]
+        out = CiDTextEncoderUnload().unload(_CLIP(patcher), pos)
+        self.assertEqual(len(out), 2)
+        self.assertIs(out[0], pos)
+        self.assertEqual(out[1], [[("zeros_like", "emb"), {"pooled_output": "pool", "minimax_keyframes": ["kf"]}]])
+        self.assertEqual(_calls, [("zero_out", pos)])
+        self.assertEqual(self.calls, [("unload", patcher, True), ("empty_cache", True)])
+
+    def test_connected_negative_is_not_zeroed(self):
+        _calls.clear()
+        neg = object()
+        out = CiDTextEncoderUnload().unload(_CLIP(_Patcher("cuda:0", "cpu")), object(), neg)
+        self.assertIs(out[1], neg)
+        self.assertEqual(_calls, [])
+
+    def test_clip_without_patcher_is_rejected(self):
+        with self.assertRaises(ValueError):
+            unload_clip("CLIP<not a real clip>")
+        self.assertEqual(self.calls, [])
 
 
 if __name__ == "__main__":
