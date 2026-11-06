@@ -3,7 +3,7 @@
 ComfyUI 개인용 확장 모음입니다. 두 부분으로 되어 있습니다.
 
 - **Export (API, normalized)**: API 포맷 export의 노드 번호를 `"1".."N"`으로 다시 매기는 프론트엔드 커맨드
-- **CiD 노드**: 통합 모델 로더, 텍스트 인코더 언로드, 길이→프레임 수, 종횡비/메가픽셀 해상도 계산, H3 keyframe 크기 변환
+- **CiD 노드**: 통합 모델 로더, 텍스트 인코더 언로드, 길이→프레임 수, 종횡비/메가픽셀 해상도 계산, H3 keyframe 크기 변환, H3 세그먼트 연쇄(Latent Prefix, AV latent 저장/로드, Decode & Save)
 
 ## 설치
 
@@ -14,7 +14,7 @@ cd ComfyUI/custom_nodes
 git clone https://github.com/CiDMaker/comfy-cid.git
 ```
 
-Python 의존성은 없습니다(ComfyUI 자체가 제공하는 것만 씁니다). ComfyUI 프론트엔드 1.27 이상을 권장합니다(그 이하 버전에서도 동작하지만 메뉴 위치가 다릅니다. 아래 "알려진 제약" 참고).
+Python 의존성은 없습니다(ComfyUI 자체가 제공하는 torch, safetensors, PyAV만 씁니다). ComfyUI 프론트엔드 1.27 이상을 권장합니다(그 이하 버전에서도 동작하지만 메뉴 위치가 다릅니다. 아래 "알려진 제약" 참고).
 
 ## CiD 노드
 
@@ -108,6 +108,90 @@ MiniMax H3 Image to Video가 내는 conditioning은 텍스트 임베딩과 `mini
 - latent 길이와 맞지 않는 keyframe(프레임 인덱스가 범위 밖)이 있으면 에러를 냅니다. conditioning과 latent가 다른 길이로 만들어진 경우입니다.
 
 Pass1 텍스트 임베딩에는 원래 캔버스 크기 이미지의 vision 토큰이 들어 있습니다. 업스케일 크기로 MiniMax H3 Image to Video를 다시 돌리면 vision 토큰 수가 달라지는데, 이 노드는 그 차이를 재현하지 않습니다. 결과에 차이가 느껴지면 기존 방식과 비교해 보세요.
+
+## H3 세그먼트 연쇄 (H3 Chain)
+
+MiniMax H3는 한 번의 샘플링으로 8~10초가 적정선입니다. 그 이상의 장면은 세그먼트를 이어 붙여야 하는데, 이 노드들은 **이전 세그먼트 샘플러 출력 latent의 끝(기본 7토큰 = 22프레임)을 다음 세그먼트 latent 앞에 붙이고 noise mask 0으로 고정**해 앞 구간을 다시 그리지 않고 이어 갑니다. 세그먼트 하나를 서브그래프 블록으로 만들어 N개를 직렬로 연결하면 긴 장면이 워크플로 하나, 큐 한 번으로 나옵니다. 설계와 검증 근거는 [docs/h3-chain-plan.md](docs/h3-chain-plan.md), 검증에 쓴 API 그래프는 `docs/h3_latent_chain_workflows.zip`에 있습니다.
+
+### H3 Latent Prefix
+
+이전 세그먼트의 AV latent 끝을 새 latent 앞에 고정합니다. Pass1(빈 latent)과 Pass2(업스케일된 latent) 모두 같은 노드를 씁니다.
+
+| 입력 | 뜻 |
+| --- | --- |
+| `latent` | 새 세그먼트의 AV latent. MiniMax H3 Reference to Video의 latent 출력, 또는 업스케일 서브그래프의 출력 |
+| `prev_latent` (선택) | 이전 세그먼트의 샘플러 출력 AV latent. 같은 패스, 같은 해상도여야 함. 비워 두면 `latent`를 그대로 통과 |
+| `prefix_tokens` | 고정할 video 토큰 수. 5m+2(2, 7, 12 …)만 허용. 기본 7 = 22프레임 |
+| `audio` | 오디오 latent도 같은 구간을 고정(22프레임 → 37틱) |
+
+| 출력 | 뜻 |
+| --- | --- |
+| `latent` | prefix가 들어가고 noise_mask가 설정된 AV latent → 샘플러 `latent_image` |
+| `prefix_frames` | 조인할 때 이 세그먼트 앞에서 잘라낼 프레임 수(7토큰 → 22) |
+| `prefix_seconds` | 조인할 때 잘라낼 초(`prefix_frames / 24`) |
+
+- `prefix_tokens`가 5m+2가 아니면 에러 메시지로 가까운 두 값을 알려 줍니다. (1,4,4,4,4) 토큰 주기가 새 latent 앞에서 맞으려면 이 조건이 필요합니다.
+- 입력 `latent`의 오디오에 이미 noise_mask가 있으면(업스케일 서브그래프가 오디오를 전부 보존하는 경우) 오디오 prefix를 건너뛰고 그 마스크를 그대로 둡니다. Pass2에서 따로 켤 것이 없습니다.
+- `prev_latent`에서는 `samples`만 읽습니다. 샘플러 출력 dict에 실려 오는 noise_mask는 무시합니다.
+- 해상도나 배치가 다르거나, 이전 latent가 prefix보다 짧으면 에러를 냅니다.
+
+### H3 Save AV Latent / H3 Save AV Latent (passthrough)
+
+승인된 세그먼트의 AV latent를 safetensors 파일 하나(`.h3lat`)로 저장하고 입력을 그대로 통과시킵니다. 같은 시드로 다시 돌려도 복사본이 나오지 않으므로, 승인 클립의 latent는 그 실행에서 저장해 두어야 다음 세그먼트를 이어 갈 수 있습니다.
+
+| 입력 | 뜻 |
+| --- | --- |
+| `latent` | 저장할 AV latent(샘플러 출력) |
+| `path` | 절대경로 또는 output 폴더 기준 상대경로. 확장자가 없으면 `.h3lat`을 붙임 |
+| `overwrite` | false이면 파일이 이미 있을 때 에러를 내서 승인된 latent를 보호 |
+| `note` (선택) | 메타데이터에 남길 메모 |
+
+출력은 `latent`(입력 그대로), `path`(쓴 절대경로)입니다. 파일에는 `video`, `audio`와 noise_mask(있으면), 메타데이터(frames, tokens, width, height, audio_ticks, note, 생성 시각, ComfyUI 버전, 프롬프트 해시)가 들어갑니다.
+
+두 변형의 차이는 **실행 보장**입니다.
+
+- **H3 Save AV Latent**는 출력 노드입니다. 아무도 출력을 소비하지 않아도 실행되므로 Pass1 출력(항상 샘플링되는 쪽)에 씁니다. 뒤 블록을 mute한 승인 대기 블록도 저장됩니다.
+- **(passthrough)** 변형은 출력 노드가 아니라 하류가 요구할 때만 실행됩니다. Pass2 출력에 쓰고, 통과 출력을 업스케일 스위치의 `on_true`에 연결합니다. 업스케일을 끄면 Pass2 샘플링 자체가 돌지 않습니다. Pass2 뒤에 출력 노드 변형을 두면 업스케일을 꺼도 Pass2가 강제로 실행됩니다.
+
+### H3 Load AV Latent
+
+저장한 파일을 다시 읽습니다. 입력 `path`(절대경로, 또는 output·input 폴더 기준 상대경로). 출력은 `latent`(noise_mask 없음), `frames`, `width`, `height`입니다. ComfyUI를 재시작한 뒤 승인된 세그먼트를 다시 샘플링하지 않고 이어 가거나, 다른 호스트에서 이어 갈 때 블록의 `prev_*` 입력에 연결합니다. 파일이 바뀌면 캐시가 무효화됩니다.
+
+### H3 Decode & Save
+
+AV latent를 비디오 VAE와 오디오 VAE로 디코드해 mp4로 저장하고 **경로 문자열만** 출력합니다. 출력 노드이며 미리보기를 표시합니다.
+
+| 입력 | 뜻 | 기본값 |
+| --- | --- | --- |
+| `latent`, `vae`, `audio_vae` | AV latent와 두 VAE | |
+| `filename_prefix` | SaveVideo와 같은 규칙(output 기준, 하위 폴더 가능) | `CiD/h3_segment` |
+| `fps` | 프레임 레이트 | 24 |
+| `crf` | h264 품질(SaveVideo encoding auto의 기본값과 같음) | 18 |
+| `tiled` | 켜면 VAE Decode (Tiled), 끄면 VAE Decode(한 번에, 빠르지만 메모리 더 필요) | true |
+| `tile_size`, `overlap`, `temporal_size`, `temporal_overlap` | VAE Decode (Tiled)와 같은 뜻. `tiled`가 켜졌을 때만 쓰임 | 512, 64, 64, 8 |
+
+VAE Decode (Tiled) 또는 VAE Decode → VAE Decode Audio → Create Video → Save Video 네 노드를 하나로 합친 것으로, 각 단계는 코어 클래스에 위임합니다. 디코드된 IMAGE가 노드 출력이 아니므로 ComfyUI 캐시에 남지 않습니다. 블록마다 IMAGE가 캐시에 남으면 10초당 2.7 GB(1280×736)에서 11 GB(2560×1472)가 누적되어, 통합 메모리 장비에서는 블록 몇 개만 이어도 샘플링 메모리를 잠식합니다.
+
+### 블록 배선
+
+`video_deno_ref` 그래프 기준입니다.
+
+```
+R2V ──latent──► [H3 Latent Prefix A] ──► Pass1 샘플러
+                  ▲ prev_latent = 이전 블록의 P1
+Pass1 ──► [H3 Save AV Latent] (cut_p1) ──► 블록 출력 P1
+      └─► 업스케일 서브그래프 ──► [H3 Latent Prefix B] ──► Pass2 샘플러
+                                    ▲ prev_latent = 이전 블록의 P2
+Pass2 ──► [H3 Save AV Latent (passthrough)] (cut_p2) ──► 블록 출력 P2
+                                                     └──► 스위치 .on_true
+스위치(upscale on/off; on_false = Pass1) ──► [H3 Decode & Save] ──► path
+```
+
+- 블록 1은 `prev_*`를 비워 둡니다. 단일 컷 워크플로와 같습니다.
+- 블록 k의 시드나 프롬프트만 바꾸면 k 이후만 다시 실행됩니다.
+- 승인 흐름: 뒤 블록을 mute 해 두고 하나씩 풀어 갑니다. 재시작 뒤에는 승인된 블록의 `prev_*`를 H3 Load AV Latent로 바꿔 꽂습니다.
+- 조인은 각 세그먼트 영상의 앞 `prefix_frames`프레임(오디오는 `prefix_seconds`초)을 잘라 이어 붙입니다. 이 저장소는 조인을 하지 않습니다.
+- 모델이 기억하는 것은 직전 22프레임입니다. 장면 서사의 연속성은 블록별 프롬프트가 담당합니다. 오디오 prefix는 이전 컷 끝 소리를 이어가므로 컷 경계는 대사나 호흡 사이에 두는 편이 안전합니다.
 
 ## Export (API, normalized)
 
@@ -217,8 +301,9 @@ JavaScript 객체는 정수형 키를 항상 먼저 오름차순으로 나열하
 export 로직은 `js/normalize_core.js`에, 노드의 계산은 `cid_nodes/*.py`의 모듈 함수에 있어 ComfyUI 없이 테스트할 수 있습니다.
 
 ```bash
-npm test        # JS (Node 22 기준)
-npm run test:py # Python unittest
+npm test               # JS (Node 22 기준)
+npm run test:py        # Python unittest (torch가 없으면 H3 텐서 테스트는 skip)
+scripts/gb10_test.sh   # test_h3_*.py를 gb10(dgxspark)에 동기화해 ComfyUI venv로 실행
 ```
 
 ```
@@ -232,9 +317,18 @@ cid_nodes/
   video_frames.py     # CiD_VideoFrames
   size_params.py      # CiD_SizeParams
   h3_keyframes.py     # CiD_H3ResizeKeyframes
+  h3_av.py            # H3 AV latent 공용 헬퍼(프레임·토큰·틱 계산, 분리/결합)
+  h3_prefix.py        # CiD_H3LatentPrefix
+  h3_latent_io.py     # CiD_H3SaveAVLatent(+Passthrough), CiD_H3LoadAVLatent
+  h3_decode_save.py   # CiD_H3DecodeSave
 test/
   normalize_core.test.js
   test_cid_nodes.py
+  test_h3_*.py        # H3 노드 테스트(텐서 테스트는 gb10에서)
+docs/
+  h3-chain-plan.md    # H3 세그먼트 연쇄 기획서
+scripts/
+  gb10_test.sh
 __init__.py           # cid_nodes의 매핑을 재노출, WEB_DIRECTORY = "./js"
 ```
 

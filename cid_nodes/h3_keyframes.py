@@ -38,15 +38,9 @@ without them.
 
 CATEGORY = "CiD/video"
 
-VAE_DOWNSAMPLE = 16
-LATENT_CHANNELS = 24
-# comfy.ldm.minimax.model.FRAME_PER_TOKEN: pixel frames covered by latent frame k (k % 5)
-FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
-
-
-def frame_count_from_latent_t(latent_t):
-    """Pixel frames for a video latent with ``latent_t`` frames (2 -> 5, 37 -> 124)."""
-    return sum(FRAME_PER_TOKEN[k % 5] for k in range(latent_t))
+from .h3_av import FRAME_PER_TOKEN, VAE_DOWNSAMPLE  # noqa: F401  (shared H3 constants)
+from .h3_av import VIDEO_CHANNELS as LATENT_CHANNELS
+from .h3_av import frames_from_tokens as frame_count_from_latent_t  # 2 -> 5, 37 -> 124
 
 
 def merge_keyframes(existing, replacements, frame_count):
