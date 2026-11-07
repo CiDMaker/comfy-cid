@@ -258,8 +258,10 @@ class LiveRoundTrip(unittest.TestCase):
             body = client.get_object(Bucket=cfg["bucket"], Key=key)
             self.assertEqual(body["Body"].read(), payload)
             self.assertEqual(body["ContentType"], "text/plain")
-            from urllib.request import urlopen
-            with urlopen(url, timeout=20) as r:          # presigned GET through the reverse proxy
+            from urllib.request import Request, urlopen
+            # presigned GET through the reverse proxy; Cloudflare's browser check (error 1010) rejects
+            # the default Python-urllib User-Agent, so send a plain one
+            with urlopen(Request(url, headers={"User-Agent": "comfy-cid-test/1"}), timeout=20) as r:
                 self.assertEqual(r.read(), payload)
             with self.assertRaises(FileExistsError):
                 s3.upload_file(client, path, cfg["bucket"], key, overwrite=False)
