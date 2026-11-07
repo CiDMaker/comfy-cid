@@ -227,10 +227,10 @@ IMAGE 배치를 코어 Save Image와 같은 방식(같은 파일명 규칙·메�
 ```bash
 mkdir -p ~/.config/comfy-cid
 cp s3.example.json ~/.config/comfy-cid/s3.json && chmod 600 ~/.config/comfy-cid/s3.json
-# endpoint https://s3.cidbase.dev, region garage, bucket, access_key, secret_key 를 채운다
+# endpoint https://s3.cidbase.dev, region garage, bucket(ComfyUI 전용 버킷 comfyui), access_key, secret_key 를 채운다
 ```
 
-Garage용 설정: path-style 주소(`https://s3.<domain>/<bucket>/<key>`), region `garage`, SigV4. 키는 홈서버에서 `garage key create <이름>` 뒤 `garage bucket allow --read --write --key <이름> <버킷>`으로 만듭니다. `presign_seconds`가 0일 때의 `url`은 버킷이 공개(website access)이거나 자격 증명이 있어야 열립니다.
+Garage용 설정: path-style 주소(`https://s3.<domain>/<bucket>/<key>`), region `garage`, SigV4. 키는 홈서버에서 `garage key create <이름>` 뒤 `garage bucket allow --read --write --key <이름> <버킷>`으로 만듭니다. 실행 환경(DGX, Modal)마다 키를 따로 두고, 버킷은 ComfyUI 전용 `comfyui`를 씁니다. `presign_seconds`가 0일 때의 `url`은 버킷이 공개(website access)이거나 자격 증명이 있어야 열립니다.
 
 실제 버킷으로 왕복 테스트: 설정을 마친 뒤 `CID_S3_TEST=1 python3 -m unittest discover -s test -p "test_s3_*.py"`(올린 객체는 테스트가 지웁니다).
 
