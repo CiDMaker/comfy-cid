@@ -3,7 +3,7 @@
 ComfyUI 개인용 확장 모음입니다. 두 부분으로 되어 있습니다.
 
 - **Export (API, normalized)**: API 포맷 export의 노드 번호를 `"1".."N"`으로 다시 매기는 프론트엔드 커맨드
-- **CiD 노드**: 통합 모델 로더, 텍스트 인코더 언로드, 길이→프레임 수, 종횡비/메가픽셀 해상도 계산, H3 keyframe 크기 변환, H3 세그먼트 연쇄(Latent Prefix, AV latent 저장/로드, Decode & Save)
+- **CiD 노드**: 통합 모델 로더, 텍스트 인코더 언로드, 길이→프레임 수, 종횡비/메가픽셀 해상도 계산, H3 keyframe 크기 변환, H3 세그먼트 연쇄(Latent Prefix, AV latent 저장/로드, Decode & Save), S3(Garage) 업로드
 
 ## 설치
 
@@ -14,11 +14,11 @@ cd ComfyUI/custom_nodes
 git clone https://github.com/CiDMaker/comfy-cid.git
 ```
 
-Python 의존성은 없습니다(ComfyUI 자체가 제공하는 torch, safetensors, PyAV만 씁니다). ComfyUI 프론트엔드 1.27 이상을 권장합니다(그 이하 버전에서도 동작하지만 메뉴 위치가 다릅니다. 아래 "알려진 제약" 참고).
+Python 의존성은 S3 노드가 쓰는 `boto3` 하나입니다(`pip install -r requirements.txt`를 ComfyUI의 Python으로 실행; 다른 노드는 ComfyUI 자체가 제공하는 torch, safetensors, PyAV만 씁니다). ComfyUI 프론트엔드 1.27 이상을 권장합니다(그 이하 버전에서도 동작하지만 메뉴 위치가 다릅니다. 아래 "알려진 제약" 참고).
 
 ## CiD 노드
 
-노드 검색에서 `[CiD]`로 찾을 수 있고, 카테고리는 `CiD/loaders`, `CiD/video`, `CiD/image`입니다.
+노드 검색에서 `[CiD]`로 찾을 수 있고, 카테고리는 `CiD/loaders`, `CiD/video`, `CiD/image`, `CiD/io`입니다.
 
 ### Model Loader (UNET + CLIP + 2 VAE)
 
@@ -193,6 +193,47 @@ Pass2 ──► [H3 Save AV Latent (passthrough)] (cut_p2) ──► 블록 출�
 - 조인은 각 세그먼트 영상의 앞 `prefix_frames`프레임(오디오는 `prefix_seconds`초)을 잘라 이어 붙입니다. 이 저장소는 조인을 하지 않습니다.
 - 모델이 기억하는 것은 직전 22프레임입니다. 장면 서사의 연속성은 블록별 프롬프트가 담당합니다. 오디오 prefix는 이전 컷 끝 소리를 이어가므로 컷 경계는 대사나 호흡 사이에 두는 편이 안전합니다.
 
+## S3 업로드 (Garage)
+
+생성 결과를 홈서버의 Garage(S3 호환) 버킷으로 올리는 두 노드입니다. 카테고리 `CiD/io`.
+
+### S3 Upload File
+
+파일 경로 문자열을 받아 그 파일을 객체 하나로 올립니다. H3 Decode & Save의 `path` 출력을 바로 연결하는 용도입니다. 출력 노드이므로 아래에 아무것도 연결하지 않아도 실행됩니다.
+
+| 입력 | 뜻 | 기본값 |
+| --- | --- | --- |
+| `path` | 올릴 로컬 파일(입력 소켓) | |
+| `object_name` | 키의 파일명 부분. 비우면 로컬 파일명. `%date:...%` 가능 | 빈 값 |
+| `key_prefix` | 키의 폴더 부분. `%date:yyyy-MM-dd%` 같은 Save Image 날짜 토큰 가능 | `comfyui/%date:yyyy-MM-dd%` |
+| `bucket`, `endpoint` | 비우면 환경변수·설정 파일 값 | 빈 값 |
+| `overwrite` | 꺼져 있으면 같은 키가 이미 있을 때 실패 | false |
+| `presign_seconds` | 0이면 `url`은 일반 객체 URL, 0보다 크면 그 초 동안 유효한 presigned GET 링크(최대 7일) | 0 |
+| `delete_local` | 업로드 성공 뒤 로컬 파일 삭제 | false |
+
+출력은 `url`, `s3_uri`(`s3://bucket/key`), `key`입니다. 큰 mp4는 boto3가 자동으로 멀티파트 업로드합니다.
+
+### S3 Save Image
+
+IMAGE 배치를 코어 Save Image와 같은 방식(같은 파일명 규칙·메타데이터, output 폴더에 기록)으로 PNG로 저장한 뒤 파일마다 업로드합니다. 입력은 `images`, `filename_prefix`(Save Image와 같음, 기본 `CiD/s3`)와 위 공통 입력이고, 출력 `urls`, `s3_uris`, `keys`는 줄바꿈으로 구분한 목록입니다. `delete_local`을 켜면 업로드 뒤 output 폴더의 PNG를 지웁니다(미리보기도 사라짐).
+
+### 설정과 자격 증명
+
+자격 증명은 워크플로에 저장되지 않도록 노드 위젯으로 받지 않습니다. 우선순위는 **노드 위젯 > 환경변수 > JSON 파일**입니다.
+
+- 환경변수: `CID_S3_ENDPOINT`, `CID_S3_REGION`, `CID_S3_BUCKET`, `CID_S3_ACCESS_KEY`, `CID_S3_SECRET_KEY` (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` 쌍도 인식)
+- JSON 파일: `$CID_S3_CONFIG` → 이 저장소 루트의 `s3.json`(gitignore 됨) → `~/.config/comfy-cid/s3.json` 순서로 첫 파일. 형식은 `s3.example.json` 참고.
+
+```bash
+mkdir -p ~/.config/comfy-cid
+cp s3.example.json ~/.config/comfy-cid/s3.json && chmod 600 ~/.config/comfy-cid/s3.json
+# endpoint https://s3.cidbase.dev, region garage, bucket, access_key, secret_key 를 채운다
+```
+
+Garage용 설정: path-style 주소(`https://s3.<domain>/<bucket>/<key>`), region `garage`, SigV4. 키는 홈서버에서 `garage key create <이름>` 뒤 `garage bucket allow --read --write --key <이름> <버킷>`으로 만듭니다. `presign_seconds`가 0일 때의 `url`은 버킷이 공개(website access)이거나 자격 증명이 있어야 열립니다.
+
+실제 버킷으로 왕복 테스트: 설정을 마친 뒤 `CID_S3_TEST=1 python3 -m unittest discover -s test -p "test_s3_*.py"`(올린 객체는 테스트가 지웁니다).
+
 ## Export (API, normalized)
 
 워크플로를 **API 포맷**으로 내보낼 때 노드 번호를 `"1".."N"`으로 다시 매기는 프론트엔드 커맨드입니다.
@@ -321,15 +362,19 @@ cid_nodes/
   h3_prefix.py        # CiD_H3LatentPrefix
   h3_latent_io.py     # CiD_H3SaveAVLatent(+Passthrough), CiD_H3LoadAVLatent
   h3_decode_save.py   # CiD_H3DecodeSave
+  s3_upload.py        # CiD_S3UploadFile, CiD_S3SaveImage (boto3 지연 import)
 test/
   normalize_core.test.js
   test_cid_nodes.py
   test_h3_*.py        # H3 노드 테스트(텐서 테스트는 gb10에서)
+  test_s3_upload.py   # S3 노드 테스트(가짜 클라이언트; CID_S3_TEST=1이면 실제 버킷 왕복)
 docs/
   h3-chain-plan.md    # H3 세그먼트 연쇄 기획서
 scripts/
   gb10_test.sh
 __init__.py           # cid_nodes의 매핑을 재노출, WEB_DIRECTORY = "./js"
+requirements.txt      # boto3 (S3 노드)
+s3.example.json       # S3 설정 파일 예시 (실제 s3.json은 gitignore)
 ```
 
 ## 알려진 제약 (Export)

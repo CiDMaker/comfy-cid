@@ -1,0 +1,7 @@
+{
+  "endpoint": "https://s3.cidbase.dev",
+  "region": "garage",
+  "bucket": "comfystudio-dev",
+  "access_key": "GK...",
+  "secret_key": "..."
+}
