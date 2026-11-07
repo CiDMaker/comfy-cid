@@ -16,7 +16,10 @@ Every step delegates to the core code so behaviour follows ComfyUI updates:
   (bit_depth "auto" -> 8 for sRGB, color_space sRGB),
 * encode: ``VideoFromComponents.save_to(format=mp4, codec=h264, crf=...)``,
   which is exactly what SaveVideo calls; its ``crf`` argument is SaveVideo's
-  "re-encode" knob (core default 18 when the graph leaves encoding on auto).
+  "re-encode" knob (core default 18 when the graph leaves encoding on auto),
+* file name: ``folder_paths.get_save_image_path`` after ``%date:...%`` expansion
+  (filename_vars; the frontend expands it only for core Save nodes), so
+  ``Local/%date:yyMMdd%/h3`` writes ``output/Local/261107/h3_00001_.mp4``.
 
 torch / comfy / nodes are imported inside ``execute`` so this module imports
 without ComfyUI.
@@ -25,6 +28,7 @@ without ComfyUI.
 import os
 
 from . import h3_av as common
+from .filename_vars import expand_date
 
 VIDEO_FORMAT = "mp4"
 VIDEO_CODEC = "h264"
@@ -109,7 +113,8 @@ class CiDH3DecodeSave:
                 "filename_prefix": ("STRING", {
                     "default": "CiD/h3_segment",
                     "tooltip": "Prefix of the saved file, relative to the output directory; may contain "
-                               "subfolders and %date:...%-style variables like Save Video."}),
+                               "subfolders and %date:yyMMdd%-style variables like Save Video "
+                               "(e.g. Local/%date:yyMMdd%/h3 -> Local/261107/h3_00001_.mp4)."}),
                 "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 1.0,
                                   "tooltip": "Frame rate of the saved video."}),
                 "crf": ("INT", {"default": 18, "min": 0, "max": 51, "step": 1,
@@ -147,7 +152,7 @@ class CiDH3DecodeSave:
             audio_out = decode_audio(audio_vae, audio, latent)
 
             full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
-                filename_prefix, folder_paths.get_output_directory(), images.shape[2], images.shape[1])
+                expand_date(filename_prefix), folder_paths.get_output_directory(), images.shape[2], images.shape[1])
             file = output_file_name(filename, counter)
             path = os.path.abspath(os.path.join(full_output_folder, file))
             save_mp4(images, audio_out, fps, crf, path,

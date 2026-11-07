@@ -164,7 +164,7 @@ AV latent를 비디오 VAE와 오디오 VAE로 디코드해 mp4로 저장하고 
 | 입력 | 뜻 | 기본값 |
 | --- | --- | --- |
 | `latent`, `vae`, `audio_vae` | AV latent와 두 VAE | |
-| `filename_prefix` | SaveVideo와 같은 규칙(output 기준, 하위 폴더 가능) | `CiD/h3_segment` |
+| `filename_prefix` | SaveVideo와 같은 규칙(output 기준, 하위 폴더 가능). `Local/%date:yyMMdd%/h3`처럼 `%date:...%` 토큰을 노드가 직접 치환(프런트엔드는 코어 Save 노드에만 적용) | `CiD/h3_segment` |
 | `fps` | 프레임 레이트 | 24 |
 | `crf` | h264 품질(SaveVideo encoding auto의 기본값과 같음) | 18 |
 | `tiled` | 켜면 VAE Decode (Tiled), 끄면 VAE Decode(한 번에, 빠르지만 메모리 더 필요) | true |

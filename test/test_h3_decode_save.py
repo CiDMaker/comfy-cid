@@ -198,6 +198,14 @@ class DecodeSaveSmoke(unittest.TestCase):
         out2 = node.execute(self._latent(), vae, audio_vae, "CiD/seg", 24.0, 19, True, 512, 64, 64, 8)
         self.assertEqual(os.path.basename(out2["result"][0]), "seg_00002_.mp4")
 
+    def test_date_in_prefix(self):
+        import datetime
+        today = datetime.datetime.now().strftime("%y%m%d")
+        path = CiDH3DecodeSave().execute(self._latent(), FakeVideoVAE(), FakeAudioVAE(),
+                                         "Local/%date:yyMMdd%/h3", 24.0, 19, False, 512, 64, 64, 8)["result"][0]
+        self.assertEqual(path, os.path.join(self.tmp, "Local", today, "h3_00001_.mp4"))
+        self.assertTrue(os.path.isfile(path))
+
     def test_crf_reaches_encoder(self):
         import av
         node = CiDH3DecodeSave()

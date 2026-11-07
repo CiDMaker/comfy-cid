@@ -25,13 +25,14 @@ no wildcard for ``<bucket>.s3.<domain>``), region ``garage``, SigV4. boto3 is
 imported lazily so this module (and its pure helpers) import without it.
 """
 
-import datetime
 import json
 import logging
 import mimetypes
 import os
 import posixpath
 import re
+
+from .filename_vars import expand_date  # noqa: F401  (re-exported; the S3 key tokens are the same)
 
 CATEGORY = "CiD/io"
 
@@ -118,22 +119,6 @@ def normalize_endpoint(endpoint):
 
 
 # --- object keys and URLs --------------------------------------------------
-
-_DATE_RE = re.compile(r"%date:(.*?)%")
-_DATE_MAP = (("yyyy", "%Y"), ("yy", "%y"), ("MM", "%m"), ("dd", "%d"), ("hh", "%H"), ("mm", "%M"), ("ss", "%S"))
-
-
-def expand_date(text, now=None):
-    """ComfyUI-style ``%date:yyyy-MM-dd%`` substitution (same tokens as Save Image)."""
-    now = now or datetime.datetime.now()
-
-    def sub(m):
-        fmt = m.group(1)
-        for token, code in _DATE_MAP:
-            fmt = fmt.replace(token, code)
-        return now.strftime(fmt)
-    return _DATE_RE.sub(sub, text)
-
 
 def build_key(prefix, name, now=None):
     """``prefix/name`` as a clean S3 key: ``%date:...%`` expanded, slashes collapsed, no leading slash."""
