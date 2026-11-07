@@ -185,15 +185,14 @@ def make_client(cfg):
 
 
 def object_exists(client, bucket, key):
-    from botocore.exceptions import ClientError
-    try:
-        client.head_object(Bucket=bucket, Key=key)
-        return True
-    except ClientError as e:
-        code = str(e.response.get("Error", {}).get("Code", ""))
-        if code in ("404", "NoSuchKey", "NotFound"):
-            return False
-        raise
+    """True when ``key`` exists, checked with a listing rather than ``head_object``.
+
+    A HEAD hits ``/bucket/key.mp4``: a CDN in front of the endpoint (Cloudflare caches
+    by file extension by default) may answer it from a stale cache, e.g. a cached 404
+    right after an upload. The listing URL has no extension so it is never cached.
+    The exact key sorts first among keys sharing that prefix, so one result suffices."""
+    resp = client.list_objects_v2(Bucket=bucket, Prefix=key, MaxKeys=1)
+    return any(o.get("Key") == key for o in resp.get("Contents", []))
 
 
 def upload_file(client, path, bucket, key, content_type=None, overwrite=True, presign_seconds=0, metadata=None):

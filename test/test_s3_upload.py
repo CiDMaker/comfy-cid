@@ -139,11 +139,9 @@ class FakeClient:
         self.uploads = []
         self.presigned = []
 
-    def head_object(self, Bucket, Key):
-        if (Bucket, Key) in self.existing:
-            return {}
-        from botocore.exceptions import ClientError
-        raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject")
+    def list_objects_v2(self, Bucket, Prefix, MaxKeys=1000):
+        keys = sorted(k for b, k in self.existing if b == Bucket and k.startswith(Prefix))[:MaxKeys]
+        return {"Contents": [{"Key": k} for k in keys]} if keys else {}
 
     def upload_file(self, path, bucket, key, ExtraArgs=None):
         self.uploads.append((path, bucket, key, ExtraArgs))
@@ -176,12 +174,18 @@ class UploadFlow(unittest.TestCase):
         self.assertIn("X-Amz-Expires=3600", url)
         self.assertEqual(c.presigned[0][2], 3600)
 
-    @unittest.skipUnless(HAS_BOTO3, "overwrite check raises a botocore ClientError")
     def test_no_overwrite(self):
         c = FakeClient(existing=[("bk", "p/clip.mp4")])
         with self.assertRaisesRegex(FileExistsError, "already exists"):
             s3.upload_file(c, self.path, "bk", "p/clip.mp4", overwrite=False)
         self.assertEqual(c.uploads, [])
+
+    def test_object_exists_is_exact(self):
+        c = FakeClient(existing=[("bk", "p/clip.mp4.bak"), ("bk", "p/clip.mp4x"), ("other", "p/clip.mp4")])
+        self.assertFalse(s3.object_exists(c, "bk", "p/clip.mp4"), "prefix matches are not the object")
+        c.existing.add(("bk", "p/clip.mp4"))
+        self.assertTrue(s3.object_exists(c, "bk", "p/clip.mp4"), "the exact key sorts first with MaxKeys=1")
+        self.assertFalse(s3.object_exists(c, "bk", "p/clip"))
 
     def test_missing_file(self):
         with self.assertRaises(FileNotFoundError):
